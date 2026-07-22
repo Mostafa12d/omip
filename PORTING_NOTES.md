@@ -189,7 +189,11 @@ acceptable cost, since BFL is small and Phase 1 (build skeleton) is exactly
 the phase where this vendoring work belongs. But this is your call — please
 confirm before I set up `omip_core/thirdparty/` in Phase 1.
 
-**Resolution:** _pending._
+**Resolution:** Confirmed — option (a). User: "This is the nonros package,
+do with it as you wish. https://github.com/orocos/orocos-bayesian-filtering"
+(2026-07-22). Vendor upstream Orocos BFL source from that repo into
+`omip_core/thirdparty/bfl/` in Phase 1; verify its own ROS-freedom the same
+way `lgsm` was verified (0.4) before assuming it needs no source changes.
 
 ### Q2 — Golden fixture exchange format
 
@@ -207,7 +211,9 @@ custom (de)serialization code in the C++ test harness for comparatively
 little benefit. Happy to go with CSV/JSON instead if that's easier on your
 Docker-side export script.
 
-**Resolution:** _pending._
+**Resolution:** Confirmed — npz (2026-07-22). Test harness in `tests/` will
+load `.npz` fixtures (via `cnpy` or equivalent) once they arrive from the
+Docker-side export.
 
 ### Q3 — Is `std_msgs::Header`'s `frame_id` genuinely unused inside Filter logic, or did I miss a spot?
 
@@ -220,7 +226,11 @@ suggestion to check whether it's "load-bearing... or just ROS boilerplate").
 Flagging since a wrong guess here would be a silent behavior change that's
 easy to miss in review.
 
-**Resolution:** _pending._
+**Resolution:** Not yet confirmed by the user. Proceeding on the traced
+evidence above (dropping `frame_id` from `omip_core` types) since it's a
+low-risk, well-evidenced call and revisiting it later is cheap — but flagging
+here so it gets a second look in review rather than silently assuming it's
+right.
 
 ---
 
