@@ -371,7 +371,71 @@ all currently-observed RB pairs.
 ---
 
 ## Phase 1 — Build skeleton
-Status: not started.
+Status: **done**. `omip_core` (plain CMake, no catkin) builds and links
+locally against real PCL 1.15.1, OpenCV 4.12.0, Eigen3, and Boost 1.90.0
+(all via Homebrew) plus vendored `lgsm` and `bfl`, producing an (currently
+empty) `libomip_core.a`. Verified zero `find_package(catkin ...)`/`roscpp`/
+etc. anywhere in `omip_core/CMakeLists.txt` or the vendored thirdparty
+CMakeLists.
+
+What was set up:
+- `omip_core/` directory layout matching the mission brief's target repo
+  layout (`include/omip_core/{feature_tracker,rb_tracker,joint_tracker,
+  shape_tracker,shape_reconstruction}`, `src/...`, `thirdparty/`, `tests/`,
+  `bindings/`).
+- `thirdparty/lgsm/`: verbatim copy of `lgsm/include/lgsm` (Phase 0 already
+  verified zero ROS coupling) + a new plain `CMakeLists.txt` (interface
+  library, `find_package(Eigen3)` only, catkin wrapper stripped). No source
+  changes.
+- `thirdparty/bfl/orocos_bfl/`: verbatim clone of
+  `github.com/orocos/orocos-bayesian-filtering` (master, orocos_bfl/
+  subdirectory only — `bfl_typekit/` and RTT/`stack.xml` bindings dropped,
+  they're Orocos-RTT integration, not needed). Re-grepped the actual cloned
+  source for `ros/`, `catkin`, `roscpp`, `tf/`, `tf2` — **zero matches**,
+  confirming BFL is genuinely ROS-independent as expected. Matrix/RNG
+  backend selected: **boost** (`boost::numeric::ublas` + `boost::random`),
+  matching upstream's own default and Boost already being a hard OMIP
+  dependency; the `matrix_NEWMAT.*`/`matrix_EIGEN.*` files are still
+  compiled (matching upstream's own unconditional source list) but their
+  bodies are `#ifdef`-guarded and compile to empty translation units since
+  only `__MATRIXWRAPPER_BOOST__`/`__RNGWRAPPER_BOOST__` are defined.
+- `thirdparty/bfl/CMakeLists.txt`: a **new** flat CMakeLists.txt (not
+  upstream's own) that explicitly lists the exact source files upstream's
+  own per-directory `GLOBAL_ADD_SRC` calls declare, because upstream's own
+  multi-directory build uses `${CMAKE_SOURCE_DIR}`-relative paths that only
+  resolve correctly when BFL is built as the top-level project — vendoring
+  it as a subdirectory of a larger build breaks that assumption. This is
+  build-orchestration-only; no upstream `.cpp`/`.h` content was changed
+  except one line (see judgment call J5 below).
+- **J5 (new judgment call):** `thirdparty/bfl/orocos_bfl/src/wrappers/rng/rng.cpp`
+  had `#include <../config.h>` (angle brackets) where every other sibling
+  file in the same directory structure correctly uses `#include "../config.h"`
+  (quotes) for the identical same-tree relative header — this is a
+  preexisting upstream bug/typo (angle-bracket includes don't get
+  file-relative resolution, so it only ever "worked" upstream if their old
+  build happened to add enough extra `-I` search paths to paper over it).
+  Fixed the one line to match every other file's correct form. This is a
+  preprocessor-include-syntax fix in vendored build-adjacent code, not a
+  math/behavior change — flagged here per ground rule 5 anyway since it's a
+  vendored-source edit, however trivial.
+- `omip_core/CMakeLists.txt`: top-level library target linking
+  `lgsm`, `bfl`, `Eigen3::Eigen`, PCL, OpenCV, `Boost::thread`; currently
+  builds one placeholder translation unit (`src/placeholder.cpp`), removed
+  once Phase 2 adds real ported code.
+- Toolchain notes (this machine, macOS/Homebrew): PCL was not installed;
+  installing it pulled in VTK/Qt and hit a Homebrew conflict between the
+  already-installed `qt` formula (used by this machine's existing opencv/
+  pyqt/vtk) and the `qtbase`/`qtsvg` formulae PCL's dependency chain wants.
+  Resolved via `brew link --overwrite` on the conflicting formulae per the
+  user's explicit go-ahead (2026-07-22) — `qt` itself remains installed,
+  only some of its symlinks were overwritten by `qtbase`/`qtsvg`'s. Not an
+  OMIP-repo concern, but noted here since it's exactly the kind of
+  environment-specific toolchain wrinkle a future from-scratch build on a
+  different machine might hit differently (e.g. a Linux box with no prior
+  Qt install wouldn't see this at all).
+- Not yet configured: `bindings/` (pybind11, Phase 5) and any real
+  `include/omip_core/*` headers (Phase 2+) — both empty/placeholder per the
+  phase plan's "don't skip ahead" rule.
 
 ## Phase 2 — Port `feature_tracker`
 Status: not started.
