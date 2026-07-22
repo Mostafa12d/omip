@@ -438,7 +438,185 @@ What was set up:
   phase plan's "don't skip ahead" rule.
 
 ## Phase 2 — Port `feature_tracker`
-Status: not started.
+Status: **ported, unvalidated, awaiting fixtures**. Builds cleanly (fresh
+full rebuild, zero warnings in our own code). Test harness
+(`tests/test_feature_tracker.cpp`) runs and passes trivially — reports
+"no fixtures found" and exits 0, per the mission's instruction to not
+block on missing fixtures.
+
+### 2.1 Common infrastructure ported (`omip_common` → `omip_core` root)
+
+Straight ports, include paths updated to `omip_core/...`, `ROS_ERROR_STREAM*`
+→ the new `omip_core/Log.h` shim (`OMIP_*_STREAM[_NAMED]`/`OMIP_*_NAMED`
+macros — see that file):
+- `Feature.h`/`.cpp`, `FeaturesDataBase.h`/`.cpp` — already 100% ROS-free in
+  the original (per Phase 0), unchanged besides the above.
+- `RecursiveEstimatorFilterInterface.h` — already 100% ROS-free, byte-for-byte
+  unchanged besides the include path. `RecursiveEstimatorNodeInterface.h` is
+  **not** ported (by design — it's the ROS Node layer the MuJoCo orchestrator
+  replaces, per the mission brief and Phase 0 findings).
+- `OMIPUtils.h`/`.cpp` — dropped the `geometry_msgs::Twist`-typed overloads
+  (`TransformLocation`, `GeometryMsgsTwist2EigenTwist`,
+  `EigenTwist2GeometryMsgsTwist`, `ROSTwist2EigenTwist`) since
+  `Eigen::Twistd`-only equivalents already existed side-by-side (pure
+  overload removal). Also: `<tr1/random>` (pre-C++11 TR1, unavailable on
+  this toolchain) → `<random>`, same Mersenne Twister generator and normal
+  distribution, no behavior change (see `sampleNormal`'s new comment).
+- `types.hpp` (new) + `OMIPTypeDefs.h` (ported, original filename kept) —
+  the full omip_msgs/geometry_msgs translation table from Phase 0 is now
+  materialized as real structs (`PoseWithCovariance`, `TwistWithCovariance`,
+  `StampedImage`, `CameraIntrinsics`, `RigidBodyPoseAndVel`,
+  `RigidBodyPosesAndVels`, `JointModel`, `KinematicStructure`, etc.) — all of
+  0.2/0.3's table, not just what `feature_tracker` needs, since these are
+  shared plain-data types with no algorithm attached; the Filter classes
+  that will use the rb_tracker/joint_tracker ones aren't touched until
+  Phases 3/4.
+
+### 2.2 `feature_tracker` ported
+
+- `FeatureTracker.h` (abstract base): `sensor_msgs::CameraInfo*` →
+  `const CameraIntrinsics&`; `cv_bridge::CvImagePtr` → `StampedImage::Ptr`;
+  `camera_info_manager` include dropped (unused beyond the include);
+  **`setDynamicReconfigureValues(...)` removed entirely** — dynamic_reconfigure
+  has no ROS-free equivalent, and the one field it actually controlled
+  (`pub_predicted_and_past_feats_img`) is now a plain, directly-settable
+  `FeatureTrackerConfig` field instead of a live-toggle RPC.
+- `FeatureTrackerConfig.h` (new): plain struct replacing
+  `feature_tracker_cfg.yaml` + the Filter-relevant subset of
+  `FeatureTrackerDynReconfConfig` (topic names, rosbag/advance-frame
+  settings, and other Node-only fields from the yaml are not carried over —
+  see file comment for the full field-by-field mapping).
+- `PointFeatureTracker.h`/`.cpp`: `ros::NodeHandle _node_handle` (used only
+  to read ROS params) dropped, replaced by the `FeatureTrackerConfig`
+  passed into the constructor; `sensor_msgs::CameraInfo::Ptr` →
+  `CameraIntrinsics::Ptr`; `cv_bridge::CvImagePtr` members → `StampedImage::Ptr`;
+  `ros::Time`/`ros::Time::now()` → `double` (ns or s as appropriate) via a
+  `wallClockNowSeconds()`/`wallClockNowNs()` helper (`std::chrono`).
+  `cv_bridge::cvtColor(img, "mono8")` → a small `toMono8()` helper
+  reimplementing the specific encoding conversions this codebase actually
+  exercises (bgr8/bgra8/rgb8/rgba8/mono8 → mono8) — cv_bridge's own
+  `cvtColor` is itself just `cv::cvtColor` plus an encoding-string lookup
+  table, so this isn't inventing new logic, just narrowing it to what's used.
+  `pcl_conversions::fromPCL(...).toNSec()` (PCL-header-stamp ↔ ROS-time
+  conversion) → direct `header.stamp * 1000.0` (PCL's own `uint64_t` stamp
+  is already microseconds-since-epoch by PCL's own convention, independent
+  of ROS; `fromPCL(...).toNSec()` was just `microseconds * 1000` — same
+  arithmetic, no ROS type needed).
+
+**Judgment calls (Phase 2):**
+- **J6 —** `_features_file` (an unconditionally-opened `"features.txt"` in
+  the constructor) is dropped: grepped the whole original file, confirmed
+  it is opened/closed but **never written to** anywhere — dead code with
+  zero observable behavior, and a bad pattern for a library besides (opens
+  a relative-path file in the caller's cwd unconditionally on construction).
+- **J7 —** The two duplicate `ROS_INFO_STREAM_NAMED("...ReadParameters"...)`-adjacent
+  duplicate param reads in the original `_ReadParameters()` (`max_distance`
+  read twice into the same field) collapsed to a single assignment —
+  zero behavior difference (reading the same value into the same variable
+  twice vs. once).
+- **Open question (not blocking):** the BETA "attention to motion" feature
+  (`_attention_to_motion`, disabled by default in the original yaml) gates
+  on wall-clock elapsed time (`ros::Time::now()` originally, `std::chrono`
+  wall clock now) to decide when to re-check for depth-changing regions.
+  In a MuJoCo-driven pipeline that may run faster/slower than real time,
+  this wall-clock gate may not be the intended semantics once the
+  orchestrator (Phase 6) drives this — flagging for a decision then, since
+  it's off by default today and not exercised by anything ported so far.
+
+### 2.3 lgsm removed, replaced with `omip_core/LieGroup.hpp`
+
+Per the user's decision (recorded in the Phase 1 section above) to patch
+lgsm's Eigen-evaluator incompatibility, deeper investigation during Phase 2
+revealed the gap was far more fundamental than the Phase 1 constructor
+conflicts: **lgsm predates Eigen's "evaluator" system entirely** (introduced
+in Eigen 3.3; present in both Eigen 3.4.1 and 5.0.1, the only versions
+available on this machine). Every lgsm class's *inherited* generic
+`MatrixBase` machinery (`operator()`, and by extension most arithmetic)
+fails to compile — confirmed by testing that direct access to each class's
+own underlying storage (`.get()`) works fine, while anything going through
+the generic Eigen expression machinery does not. Given this, **the user
+decided to abandon lgsm entirely** rather than keep patching Eigen-internal
+compatibility shims (see conversation record) — replaced with:
+
+- `omip_core/include/omip_core/LieGroup.hpp` (new): a small, dependency-free
+  header providing `omip::Twistd` (plain class, `Eigen::Matrix<double,6,1>`
+  storage, no `MatrixBase` inheritance — sidesteps the whole evaluator
+  problem) plus free functions `so3Exp`, `so3Dexp`, `se3Exp`, `se3Log`,
+  `se3Adjoint`. `Eigen::Displacementd` (lgsm's SE(3) group element) is
+  replaced by plain `Eigen::Isometry3d` (a first-class, fully modern-Eigen-
+  supported type) rather than a custom wrapper — no reason to reinvent that
+  part when Eigen already provides it.
+- **Every formula was extracted from lgsm's own source line-by-line** (not
+  re-derived from a textbook) specifically to preserve bit-for-bit numerical
+  behavior — verified against `LieGroup_SO3.h`, `LieGroup_SE3.h`,
+  `LieAlgebra_so3.h`, `LieAlgebra_se3.h` (all still visible in git history
+  under the now-removed `thirdparty/lgsm/`, commit `d119d10`) before the
+  directory was deleted. Round-trip-tested (`log(exp(x)) ≈ x`) for pure
+  rotation, pure translation, identity, and adjoint-of-identity — all pass.
+- **Two important, non-obvious findings while doing this, both deliberately
+  preserved rather than "fixed":**
+  1. **lgsm was built with `USE_RLAB_LOG_FUNCTION` defined**
+     (`lgsm/Lgsm:62`), so the *active* `Displacementd::log()` implementation
+     is the numerically-stabilized "RLab" `dexpinv` formula, not the
+     simpler sin/cos formula that exists side-by-side in the same function
+     guarded out by that macro. `se3Log()` replicates the RLab branch
+     specifically.
+  2. **lgsm's `se(3)` `exp(precision)` never forwards its `precision`
+     argument** to the `so(3)` `exp()`/`dexp()` calls it makes internally —
+     those always use their own hardcoded defaults (1e-5, and 1e-6/1e-2)
+     regardless of what's passed in. `se3Exp()` replicates this (its
+     `precision` parameter is intentionally unused) rather than "fixing" it.
+  3. **Round-trip testing surfaced an apparent pre-existing asymmetry in
+     lgsm itself**: `se(3)` `exp()` computes translation as
+     `dexp(w)ᵀ · v` (note the transpose — confirmed present in the literal
+     source), while `log()`'s RLab `dexpinv` is numerically confirmed
+     (empirically, via direct matrix comparison) to equal `dexp(w)⁻¹`, not
+     `(dexp(w)ᵀ)⁻¹`. Since `dexp(w)` is not symmetric in general (only when
+     the angular part is zero), `log(exp(ξ))` does **not** recover `ξ`
+     exactly for a general twist in lgsm as originally shipped — only for
+     pure-rotation or pure-translation twists (confirmed by the round-trip
+     tests: those two pass exactly, the general and near-π cases don't).
+     Standard SE(3) theory (e.g. any reference deriving the "left Jacobian")
+     has no such transpose, so this looks like a genuine latent bug in the
+     original vendor library — but since OMIP's own estimation results were
+     computed *with* this quirk baked in, **`se3Exp`/`se3Log` preserve it
+     exactly** rather than correcting it, per ground rule 5. Flagging this
+     prominently since it's exactly the kind of thing that could otherwise
+     look like a porting bug in review — it isn't; it's a faithful
+     reproduction of the original's actual (if imperfect) behavior. If
+     golden-fixture validation (Phase 3+, wherever `TransformLocation`/
+     `Twist2TransformMatrix` with a general twist is exercised) shows
+     unexpected discrepancies, revisit this note first.
+- `types.hpp`'s `TwistWithCovariance::twist` field type updated from
+  `Eigen::Twistd` → `omip::Twistd` accordingly.
+- `thirdparty/lgsm/` directory removed entirely (was vendored in Phase 1,
+  commit `d119d10`); `add_subdirectory(thirdparty/lgsm)` and the `lgsm`
+  link target removed from `omip_core/CMakeLists.txt`.
+
+### 2.4 Other toolchain-compatibility fixes (no behavior change)
+
+- `OMIP_ADD_POINT4D` macro (`OMIPTypeDefs.h`, ported from `omip_common`):
+  `EIGEN_ALIGN16` moved from suffix to prefix position on the inner
+  anonymous union. Modern Eigen expands this macro to the C++11 `alignas(16)`
+  keyword, which must precede a declaration, not follow it — the outer
+  struct already used prefix position, only the inner union (unchanged
+  since the original ROS-era Eigen) needed the fix.
+- `PointFeatureTracker.cpp`: `cvPoint(...)`/`cvPoint2D32f(...)` (OpenCV 1.x C
+  API, not available via `opencv2/core.hpp` on OpenCV 4.12) → `cv::Point(...)`/
+  `cv::Point2f(...)`. `cvRound(...)` is still available (kept as-is).
+
+### 2.5 Test harness
+
+`tests/test_feature_tracker.cpp` + `tests/fixtures/README.md` document the
+proposed `.npz` fixture schema (camera intrinsics + per-frame RGB/depth/
+expected feature positions) — **proposed**, not yet confirmed against
+whatever the Docker-side export script actually produces; revisit once real
+fixtures land. Vendored `cnpy` (MIT, github.com/rogersce/cnpy,
+`thirdparty/cnpy/`) to read `.npz`, per the user's Phase 0 decision (Q2).
+The harness runs via CTest, reports "ported, unvalidated, awaiting
+fixtures," and exits 0 when `tests/fixtures/feature_tracker/` is empty —
+confirmed working. `.npz` fixture files themselves are gitignored (generated
+data, not source).
 
 ## Phase 3 — Port `rb_tracker`
 Status: not started.

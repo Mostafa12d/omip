@@ -10,10 +10,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Third-party, non-ROS dependencies -------------------------------------
-# lgsm (Lie-group math) and BFL (Bayesian Filtering Library) are vendored
-# in thirdparty/ per PORTING_NOTES.md Phase 0/1 — both verified ROS-free.
-add_subdirectory(thirdparty/lgsm)
+# BFL (Bayesian Filtering Library) is vendored in thirdparty/ per
+# PORTING_NOTES.md Phase 0/1 — verified ROS-free. lgsm (Lie-group math) was
+# also vendored in Phase 1 but removed in Phase 2: it proved incompatible
+# with every modern Eigen version (predates Eigen's evaluator system, see
+# PORTING_NOTES.md Phase 2). Its small set of needed operations is
+# reimplemented directly against modern Eigen in
+# include/omip_core/LieGroup.hpp instead.
 add_subdirectory(thirdparty/bfl)
+# cnpy (.npy/.npz reader) is used only by the tests/ golden-fixture harness.
+add_subdirectory(thirdparty/cnpy)
 
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io registration filters segmentation)
@@ -21,12 +27,13 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc video features2d calib3d)
 find_package(Boost REQUIRED COMPONENTS thread)
 
 # --- omip_core library -------------------------------------------------
-# Phase 1 exit criterion: build an empty (placeholder) library that links
-# against every real dependency (PCL, OpenCV, Eigen, Boost, lgsm, BFL) with
-# zero ROS/catkin anywhere in this file. Real estimator sources are added
-# stage-by-stage starting in Phase 2.
 add_library(omip_core
-  src/placeholder.cpp
+  # Common infrastructure (omip_common in the original tree)
+  src/Feature.cpp
+  src/FeaturesDataBase.cpp
+  src/OMIPUtils.cpp
+  # Phase 2: feature_tracker
+  src/feature_tracker/PointFeatureTracker.cpp
 )
 
 target_include_directories(omip_core PUBLIC
@@ -35,7 +42,6 @@ target_include_directories(omip_core PUBLIC
 )
 
 target_link_libraries(omip_core PUBLIC
-  lgsm
   bfl
   Eigen3::Eigen
   ${PCL_LIBRARIES}
