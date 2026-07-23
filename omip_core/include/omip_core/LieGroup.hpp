@@ -73,10 +73,14 @@ public:
     Twistd operator+(const Twistd& o) const { return Twistd((m_coeffs + o.m_coeffs).eval()); }
     Twistd operator-(const Twistd& o) const { return Twistd((m_coeffs - o.m_coeffs).eval()); }
     Twistd operator*(double s) const { return Twistd((m_coeffs * s).eval()); }
+    Twistd operator/(double s) const { return Twistd((m_coeffs / s).eval()); }
+    Twistd& operator/=(double s) { m_coeffs /= s; return *this; }
 
 private:
     Eigen::Matrix<double, 6, 1> m_coeffs;
 };
+
+inline Twistd operator*(double s, const Twistd& t) { return t * s; }
 
 inline Eigen::Matrix3d skew(const Eigen::Vector3d& w)
 {

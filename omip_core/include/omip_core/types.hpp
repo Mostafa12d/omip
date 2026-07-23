@@ -29,6 +29,8 @@ struct PoseWithCovariance
 {
     Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
     Eigen::Matrix<double, 6, 6> covariance = Eigen::Matrix<double, 6, 6>::Zero();
+
+    typedef std::shared_ptr<PoseWithCovariance> Ptr;
 };
 
 // Replaces geometry_msgs::TwistWithCovariance.
@@ -36,6 +38,8 @@ struct TwistWithCovariance
 {
     Twistd twist;
     Eigen::Matrix<double, 6, 6> covariance = Eigen::Matrix<double, 6, 6>::Zero();
+
+    typedef std::shared_ptr<TwistWithCovariance> Ptr;
 };
 
 // --- sensor_msgs replacements ------------------------------------------

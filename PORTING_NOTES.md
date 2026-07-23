@@ -619,7 +619,99 @@ confirmed working. `.npz` fixture files themselves are gitignored (generated
 data, not source).
 
 ## Phase 3 — Port `rb_tracker`
-Status: not started.
+Status: **ported, unvalidated, awaiting fixtures**. Builds cleanly (fresh
+rebuild, zero warnings). `tests/test_rb_tracker.cpp` runs via CTest and
+passes trivially ("no fixtures found") alongside `test_feature_tracker`.
+
+### 3.1 What was ported
+
+`RBFilter` (per-rigid-body hand-rolled Eigen EKF — confirmed in Phase 0 that
+its `using namespace BFL;`/`MatrixWrapper` were vestigial, no real BFL
+dependency), `StaticEnvironmentFilter : public RBFilter` (ICP- or EKF-based
+static-environment/visual-odometry tracking), and `MultiRBTracker`
+(owns the collection of `RBFilter`s: data association, creation/deletion,
+predict/correct orchestration). Ported to
+`omip_core/{include,src}/rb_tracker/`.
+
+Type replacements (per PORTING_NOTES.md 0.2/0.3, all already designed in
+Phase 0/2):
+- `omip_msgs::RigidBodyPoseAndVelMsg` → `RigidBodyPoseAndVel`.
+- `geometry_msgs::TwistWithCovariance` → `TwistWithCovariance`.
+- `geometry_msgs::{Pose,Twist}WithCovariancePtr` → `{Pose,Twist}WithCovariance::Ptr`
+  (added `Ptr` typedefs to both structs in `types.hpp` this phase, matching
+  the existing `Feature::Ptr`/`CameraIntrinsics::Ptr` pattern).
+- `omip_msgs::ShapeTrackerStates` → `ShapeTrackerStates` (already in
+  `types.hpp` from Phase 2, unused until now).
+- `Eigen::Twistd` (lgsm) → `omip::Twistd` (Phase 2's `LieGroup.hpp`) —
+  added two operators `LieGroup.hpp` didn't need until now:
+  `Twistd::operator/(double)` and a free `operator*(double, const Twistd&)`
+  (scalar-on-the-left), both used pervasively in `rb_tracker`'s velocity
+  arithmetic (`twist / dt`, `dt * twist`).
+- `tf::Transform` (in `StaticEnvironmentFilter` only) → `Eigen::Isometry3d`
+  — the two are mathematically equivalent rigid-transform representations;
+  replaced the local `Eigen2Tf()` helper with direct `Eigen::Isometry3d`
+  construction from the `Matrix4f`/`Matrix4d` PCL/SVD result, and
+  `.getOrigin().length()` / `.getBasis()` trace → `.translation().norm()` /
+  `.linear().trace()` for the ICP convergence check.
+- `rb_tracker::RBTrackerDynReconfConfig` and `setDynamicReconfigureValues(...)`
+  dropped entirely on both `RBFilter`/`MultiRBTracker` — same precedent as
+  `feature_tracker` in Phase 2 (no ROS-free equivalent; the 3 fields it
+  controlled — `cam_motion_constraint`, `min_feats_new_rb`,
+  `min_feats_survive_rb` — are already plain constructor arguments here,
+  just no longer live-updatable at runtime via a ROS service).
+- `ros::NodeHandle _nh` and `tf::TransformListener _tf_listener` dropped
+  from `StaticEnvironmentFilter` (confirmed dead — `_nh` unused, `_tf_listener`
+  only referenced inside commented-out code).
+- `pcl_conversions::toPCL(ros::Time(...))` (in `MultiRBTracker::getPredictedMeasurement`)
+  → direct arithmetic: PCL's own point-cloud `header.stamp` is already
+  microseconds-since-epoch by PCL's own convention (independent of ROS), so
+  `(measurement_timestamp_ns + loop_period_ns) / 1000.0` reproduces the
+  exact same value the ROS round-trip computed, without needing
+  `pcl_conversions` or the `ROS_VERSION_MINIMUM`/`pcl_conversions_indigo.h`
+  compatibility shim at all.
+- `meas_from_st.header.stamp.toNSec()` → `meas_from_st.timestamp_ns`
+  (`ShapeTrackerStates` already carries a plain timestamp field).
+- Unused includes dropped (confirmed unused, no symbol referenced):
+  `unsupported/Eigen/{MatrixFunctions,NonLinearOptimization,NumericalDiff}`,
+  `pcl_ros/transforms.h`, `omip_msgs/RigidBodyTwistWithCovMsg.h`.
+
+**Judgment calls (Phase 3):**
+- **J9 —** `getchar()` in `RBFilter::predictState()`'s negative-time-interval
+  sanity check dropped, same rationale as prior blocking-debug-artifact
+  removals (J-series precedent from Phase 2): a library must never block
+  on stdin. The accompanying `OMIP_ERROR_STREAM` log call is kept.
+- **J10 —** `_really_free_feats_file` (`std::ofstream` member, opened via a
+  commented-out `.open()` call in the constructor, never written to
+  anywhere) dropped — dead code, same pattern as J6 in Phase 2.
+- **J11 —** Several `geometry_msgs`-message field-by-field copies collapsed
+  to direct struct/matrix assignment now that the ROS message boundary is
+  gone — e.g. `getPoseWithCovariance()`'s quaternion decomposition
+  (`orientation.x/y/z/w` from a rotation matrix) is now just
+  `pose.pose = Eigen::Isometry3d(_pose)`; covariance `float64[36]` flat-array
+  copies (`for i,j: covariance[6*i+j] = ...`) are now single `Eigen::Matrix`
+  assignments; `setPredictedState`'s `hypothesis.pose_wc.twist.angular.x/y/z`
+  + `.linear.x/y/z` reconstruction into an `Eigen::Twistd` is now a direct
+  copy since `hypothesis.pose_wc.twist` is already an `omip::Twistd`. These
+  are not behavior changes (identical values end up in identical places),
+  just simplifications that fall out naturally once the ROS message
+  boundary requiring field-by-field translation no longer exists.
+- **`StaticEnvironmentFilter::constrainMotion()`** ported as the same no-op
+  it already was in the original: every branch of its motion-constraint
+  logic was commented out in the ROS source (confirmed in Phase 0 and
+  reconfirmed while reading the full file this phase) — only the
+  never-active `ROBOT_XY_BASELINK_PLANE` branch had any real logic (a
+  `"/base_link"`↔`"/camera_rgb_optical_frame"` tf lookup), and it was dead
+  code too. Not revived.
+
+### 3.2 Test harness
+
+`tests/test_rb_tracker.cpp` + `tests/fixtures/README.md` document the
+proposed `.npz` schema (per-frame feature id/xyz measurements in, per-rigid-
+body pose/velocity twists out) — **proposed**, not yet confirmed against
+the actual Docker-side export. Default `MultiRBTracker` construction
+parameters in the harness are matched to `rb_tracker/cfg/rb_tracker_cfg.yaml`'s
+documented defaults so the harness reflects the same configuration the
+original system would run with absent fixture-specific overrides.
 
 ## Phase 4 — Port `joint_tracker`
 Status: not started.

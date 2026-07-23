@@ -34,6 +34,10 @@ add_library(omip_core
   src/OMIPUtils.cpp
   # Phase 2: feature_tracker
   src/feature_tracker/PointFeatureTracker.cpp
+  # Phase 3: rb_tracker
+  src/rb_tracker/RBFilter.cpp
+  src/rb_tracker/StaticEnvironmentFilter.cpp
+  src/rb_tracker/MultiRBTracker.cpp
 )
 
 target_include_directories(omip_core PUBLIC
