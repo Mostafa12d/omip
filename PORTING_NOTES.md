@@ -933,7 +933,129 @@ transitively via some ROS-era header chain that no longer exists once the
 ROS includes are gone.
 
 ## Phase 5 — pybind11 bindings
-Status: not started.
+Status: **done**. `import omip_core` works from Python and round-trips a
+synthetic frame through all 3 ported stages end-to-end
+(`bindings/test_bindings_smoke.py`, wired into CTest as `test_bindings_smoke`,
+passing) — the Phase 5 exit criterion.
+
+### 5.1 New dependency
+
+Installed `pybind11` via Homebrew (`brew install pybind11`, 3.0.4) — not
+previously a project dependency. Low-risk, standard, reversible
+(`brew uninstall pybind11`); needed to do this phase's actual work at all.
+
+### 5.2 What was bound, and what wasn't
+
+Per the mission brief's own instruction ("keep the binding surface small
+and stable — avoid exposing every internal class"), only the 3 top-level
+stage classes and the plain data types that cross their public interfaces
+are exposed in `bindings/omip_core_py.cpp`:
+
+- **Classes:** `PointFeatureTracker`, `MultiRBTracker`, `MultiJointTracker` —
+  constructors, the `setMeasurement`/`predictState`/`predictMeasurement`/
+  `correctState`/`getState` cycle each already has, and every individual
+  `set*` configuration method (mechanical 1:1 binding, same names, matching
+  "preserve names" — no new config-struct abstraction invented for
+  `MultiRBTracker`/`MultiJointTracker` since their real C++ constructor/
+  setter shape already matches the original Filter classes' own API).
+- **Plain data types (`types.hpp`):** `Twistd`, `CameraIntrinsics`,
+  `StampedImage`, `TwistWithCovariance`, `RigidBodyPoseAndVel`,
+  `RigidBodyPosesAndVels`, `JointType`, `JointModel`, `KinematicStructure`,
+  `FeatureTrackerConfig`. `Eigen::Vector3d`/`Matrix2d`/`Matrix3d`/
+  `Matrix<double,6,6>` fields convert to/from numpy arrays automatically via
+  `pybind11/eigen.h` — no manual glue needed for any of them.
+- **`FeatureCloudPCLwc`** (`ft_state_t == rbt_measurement_t`, the type
+  flowing feature_tracker → rb_tracker) is bound **opaquely** — just enough
+  to hold and pass it through Python (`py::class_<..., FeatureCloudPCLwc::Ptr>`
+  + a `.size()` accessor), no per-point inspection exposed. This was free:
+  confirmed (`pcl/memory.h` in the installed PCL 1.15) that
+  `pcl::shared_ptr` is `std::shared_ptr`, matching pybind11's default
+  holder with zero extra conversion code.
+- **`RigidBodyPosesAndVels`** is *also* `rbt_state_t == ks_measurement_t` —
+  rb_tracker's output is already joint_tracker's input type verbatim, so
+  no conversion glue was needed between those two stages either.
+- **Deliberately NOT bound:** `Feature`, `FeaturesDataBase`, `RBFilter`,
+  `StaticEnvironmentFilter`, `JointFilter` and its 4 concrete subtypes,
+  `JointCombinedFilter`, anything from BFL, `PoseWithCovariance`/
+  `Eigen::Isometry3d` (not needed — `RigidBodyPoseAndVel` uses
+  `TwistWithCovariance`, not `PoseWithCovariance`), and
+  `MultiJointTracker::getState()` itself (returns the internal
+  `KinematicModel`, a map of `JointCombinedFilterPtr` — see 5.3).
+- `make_stamped_image_rgb(numpy HxWx3 uint8, timestamp_ns)` /
+  `make_stamped_image_depth(numpy HxW float32, timestamp_ns)`: free
+  functions building a `StampedImage` from a numpy array, matching the
+  exact `encoding` conventions (`"bgr8"`/`"32FC1"`) and construction
+  pattern already used in `tests/test_feature_tracker.cpp`'s
+  `loadRgb`/`loadDepth` helpers.
+
+### 5.3 `MultiJointTracker::getKinematicStructure()` — new method
+
+`MultiJointTracker::getState()` returns the internal `KinematicModel`
+(`std::map<std::pair<int,int>, JointCombinedFilterPtr>`) — an internal
+class, not something Python should ever see per the "small stable surface"
+instruction. Added a **new** method, `getKinematicStructure() const ->
+KinematicStructure`, to `MultiJointTracker` (declared in
+`joint_tracker/MultiJointTracker.h`, implemented in `MultiJointTracker.cpp`)
+that does the conversion — this is *not* in the original Filter class; it
+is a direct, field-for-field port of what the original ROS Node layer did
+in `MultiJointTrackerNode::_generateKinematicStructureMessage()` (building
+an `omip_msgs::KinematicStructureMsg` from `getState()`), moved onto the
+Filter as "a plain class method the orchestrator can call directly" — the
+exact pattern the mission brief's own Phase 2 section names as the correct
+way to carry over non-ROS-specific Node-layer logic.
+
+Verified field-for-field against the original Node method: for every
+tracked RB pair, pulls each of the 4 joint filters' probability
+(`rigid_probability`, `discon_probability`, `rev_probability`,
+`prism_probability`), the prismatic and revolute filters' position/
+orientation/orientation-covariance/joint-value, and the combined filter's
+`getMostProbableJointFilter()->getJointFilterType()`.
+
+- **J19 —** `JointFilterType` (joint_tracker's internal C++ enum:
+  `RIGID_JOINT=0, PRISMATIC_JOINT=1, REVOLUTE_JOINT=2, DISCONNECTED_JOINT=3`)
+  and `JointType` (`types.hpp`'s plain-data enum for `JointModel`, designed
+  in Phase 0 before `joint_tracker` existed in this port:
+  `Disconnected=0, Rigid=1, Prismatic=2, Revolute=3`) turned out to use
+  *different* integer orderings for the same 4 concepts. The original
+  Node code did a raw `(int)getJointFilterType()` cast (there was no
+  `JointType`-equivalent enum to map to on the ROS side — `most_likely_joint`
+  was a bare `int32` in `omip_msgs::JointMsg`). Since `JointType` is this
+  port's own Phase-0-designed replacement with no ROS wire-format
+  constraint to preserve, a raw `static_cast<JointType>(getJointFilterType())`
+  would have silently mismapped (e.g. `RIGID_JOINT`(0) → `JointType::Disconnected`(0)).
+  Added an explicit `toJointType()` switch instead (in `MultiJointTracker.cpp`,
+  anonymous namespace) so the two independently-meaningful integer
+  encodings don't get conflated.
+- Confirmed (by re-reading the original Node method) that it never sets
+  `joint_msg.rev_position_uncertainty` despite the field existing on the
+  message — a pre-existing gap in the original Node layer, not something
+  introduced here. `getKinematicStructure()` reproduces this exactly:
+  `JointModel::rev_position_uncertainty` is left at its default-constructed
+  zero value, not fixed.
+
+### 5.4 CMake / build wiring
+
+- `omip_core/bindings/CMakeLists.txt`: `pybind11_add_module(omip_core_python omip_core_py.cpp)`
+  — the CMake *target* is named `omip_core_python` (not `omip_core`, which
+  the C++ static library target already owns), but
+  `set_target_properties(... OUTPUT_NAME omip_core LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python)`
+  makes the compiled artifact `python/omip_core.cpython-<abi>.so` —
+  loadable as `import omip_core`. (First attempt nested it one directory
+  too deep — `python/omip_core/omip_core.<abi>.so` — which made Python
+  treat `python/omip_core/` as an empty implicit namespace package instead
+  of finding the extension module inside it; fixed by not nesting.)
+- Top-level `CMakeLists.txt`: new `OMIP_CORE_BUILD_PYTHON_BINDINGS` option
+  (default `ON`), gated on `find_package(Python3 ...)` + `find_package(pybind11 CONFIG QUIET)`
+  both succeeding, so a machine without Python dev headers or pybind11 can
+  still configure/build/test the C++-only parts of `omip_core` — confirmed
+  by a from-scratch `cmake ..` with no hints, which found a working
+  Homebrew Python3.14 automatically and cleanly skipped the (numpy-requiring)
+  Python smoke test with a status message rather than failing, since numpy
+  wasn't installed for that particular interpreter.
+- `bindings/test_bindings_smoke.py` wired into CTest as `test_bindings_smoke`,
+  same "don't fail the whole suite over an optional piece" philosophy:
+  skipped (not failed) at configure time if `import numpy` fails for
+  whatever `Python3_EXECUTABLE` CMake found.
 
 ## Phase 6 — `omip_mujoco_wrapper`
 Status: not started.

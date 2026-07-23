@@ -217,6 +217,25 @@ public:
 
   virtual void estimateJointFiltersProbabilities();
 
+  /**
+   * @brief Plain-data export of the kinematic structure, added in Phase 5
+   * for the pybind11 boundary. Not in the original Filter class — this is
+   * the ROS-free replacement for what MultiJointTrackerNode's
+   * `_generateKinematicStructureMessage()` used to build (an
+   * `omip_msgs::KinematicStructureMsg` from `getState()`'s
+   * `KinematicModel`), moved onto the Filter as a plain method the
+   * orchestrator/bindings can call directly (mission brief Phase 2
+   * guidance: "keep the Node-layer logic as a plain class method").
+   * Field-for-field translation verified against that original method,
+   * including reproducing its one gap: `JointModel::rev_position_uncertainty`
+   * is never set by the original either (left at zero) — not fixed here.
+   *
+   * @return KinematicStructure One JointModel per tracked RB pair, with
+   * every one of the 4 joint filters' probability/parameters (not just the
+   * most probable one) plus `most_likely_joint`.
+   */
+  virtual KinematicStructure getKinematicStructure() const;
+
 protected:
 
   /**

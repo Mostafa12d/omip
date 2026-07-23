@@ -68,3 +68,18 @@ target_compile_definitions(omip_core PUBLIC ${PCL_DEFINITIONS})
 
 enable_testing()
 add_subdirectory(tests)
+
+# --- Phase 5: pybind11 bindings ---------------------------------------
+# Optional (default ON): a machine without pybind11/Python-dev installed can
+# still build and test omip_core itself; only the Python extension module
+# is skipped, with a clear status message.
+option(OMIP_CORE_BUILD_PYTHON_BINDINGS "Build the pybind11 Python bindings (bindings/)" ON)
+if(OMIP_CORE_BUILD_PYTHON_BINDINGS)
+  find_package(Python3 COMPONENTS Interpreter Development)
+  find_package(pybind11 CONFIG QUIET)
+  if(Python3_FOUND AND pybind11_FOUND)
+    add_subdirectory(bindings)
+  else()
+    message(STATUS "OMIP_CORE_BUILD_PYTHON_BINDINGS is ON but Python3 dev headers and/or pybind11 were not found — skipping bindings/. Install pybind11 (e.g. `brew install pybind11`) to enable.")
+  endif()
+endif()

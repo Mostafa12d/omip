@@ -318,3 +318,71 @@ void MultiJointTracker::estimateJointFiltersProbabilities()
         joint_combined_filter_it.second->estimateJointFilterProbabilities();
     }
 }
+
+namespace
+{
+// JointFilterType (joint_tracker's internal C++ enum: RIGID_JOINT=0,
+// PRISMATIC_JOINT=1, REVOLUTE_JOINT=2, DISCONNECTED_JOINT=3) and JointType
+// (types.hpp's plain-data enum for JointModel, designed in Phase 0:
+// Disconnected=0, Rigid=1, Prismatic=2, Revolute=3) do NOT share the same
+// integer ordering — an explicit switch is required, a raw static_cast
+// would silently mismap (e.g. RIGID_JOINT(0) -> JointType::Disconnected(0)).
+JointType toJointType(JointFilterType t)
+{
+    switch (t)
+    {
+    case RIGID_JOINT: return JointType::Rigid;
+    case PRISMATIC_JOINT: return JointType::Prismatic;
+    case REVOLUTE_JOINT: return JointType::Revolute;
+    case DISCONNECTED_JOINT: return JointType::Disconnected;
+    }
+    return JointType::Disconnected;
+}
+} // namespace
+
+KinematicStructure MultiJointTracker::getKinematicStructure() const
+{
+    KinematicStructure ks;
+    ks.timestamp_ns = this->_measurement_timestamp_ns;
+
+    BOOST_FOREACH(joint_combined_filters_map::value_type km_it, this->_joint_combined_filters)
+    {
+        JointModel joint_model;
+        joint_model.parent_rb_id = km_it.first.first;
+        joint_model.child_rb_id = km_it.first.second;
+
+        joint_model.rigid_probability = km_it.second->getJointFilter(RIGID_JOINT)->getProbabilityOfJointFilter();
+        joint_model.discon_probability = km_it.second->getJointFilter(DISCONNECTED_JOINT)->getProbabilityOfJointFilter();
+        joint_model.rev_probability = km_it.second->getJointFilter(REVOLUTE_JOINT)->getProbabilityOfJointFilter();
+        joint_model.prism_probability = km_it.second->getJointFilter(PRISMATIC_JOINT)->getProbabilityOfJointFilter();
+
+        joint_model.prism_position = km_it.second->getJointFilter(PRISMATIC_JOINT)->getJointPositionInRRBFrame();
+        joint_model.prism_orientation = km_it.second->getJointFilter(PRISMATIC_JOINT)->getJointOrientationUnitaryVector();
+        joint_model.prism_ori_phi = km_it.second->getJointFilter(PRISMATIC_JOINT)->getOrientationPhiInRRBFrame();
+        joint_model.prism_ori_theta = km_it.second->getJointFilter(PRISMATIC_JOINT)->getOrientationThetaInRRBFrame();
+        joint_model.prism_ori_cov(0, 0) = km_it.second->getJointFilter(PRISMATIC_JOINT)->getCovarianceOrientationPhiPhiInRRBFrame();
+        joint_model.prism_ori_cov(0, 1) = km_it.second->getJointFilter(PRISMATIC_JOINT)->getCovarianceOrientationPhiThetaInRRBFrame();
+        joint_model.prism_ori_cov(1, 0) = km_it.second->getJointFilter(PRISMATIC_JOINT)->getCovarianceOrientationPhiThetaInRRBFrame();
+        joint_model.prism_ori_cov(1, 1) = km_it.second->getJointFilter(PRISMATIC_JOINT)->getCovarianceOrientationThetaThetaInRRBFrame();
+        joint_model.prism_joint_value = km_it.second->getJointFilter(PRISMATIC_JOINT)->getJointState();
+
+        joint_model.rev_position = km_it.second->getJointFilter(REVOLUTE_JOINT)->getJointPositionInRRBFrame();
+        joint_model.rev_orientation = km_it.second->getJointFilter(REVOLUTE_JOINT)->getJointOrientationUnitaryVector();
+        joint_model.rev_ori_phi = km_it.second->getJointFilter(REVOLUTE_JOINT)->getOrientationPhiInRRBFrame();
+        joint_model.rev_ori_theta = km_it.second->getJointFilter(REVOLUTE_JOINT)->getOrientationThetaInRRBFrame();
+        joint_model.rev_ori_cov(0, 0) = km_it.second->getJointFilter(REVOLUTE_JOINT)->getCovarianceOrientationPhiPhiInRRBFrame();
+        joint_model.rev_ori_cov(0, 1) = km_it.second->getJointFilter(REVOLUTE_JOINT)->getCovarianceOrientationPhiThetaInRRBFrame();
+        joint_model.rev_ori_cov(1, 0) = km_it.second->getJointFilter(REVOLUTE_JOINT)->getCovarianceOrientationPhiThetaInRRBFrame();
+        joint_model.rev_ori_cov(1, 1) = km_it.second->getJointFilter(REVOLUTE_JOINT)->getCovarianceOrientationThetaThetaInRRBFrame();
+        joint_model.rev_joint_value = km_it.second->getJointFilter(REVOLUTE_JOINT)->getJointState();
+        // Note: rev_position_uncertainty is intentionally left at its
+        // default (zero) — the original Node's conversion never set it
+        // either, see MultiJointTracker.h's doc comment on this method.
+
+        joint_model.most_likely_joint = toJointType(km_it.second->getMostProbableJointFilter()->getJointFilterType());
+
+        ks.joints.push_back(joint_model);
+    }
+
+    return ks;
+}
