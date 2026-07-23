@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omip_mujoco_wrapper"
+version = "0.1.0"
+description = "MuJoCo driver + orchestrator for the ROS-free omip_core kinematic-structure estimation pipeline"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "mujoco>=3.0",
+    "numpy",
+]
+
+# omip_core (the pybind11 extension built from Phases 0-5) is intentionally
+# NOT listed as a dependency here: it isn't published anywhere pip can
+# resolve it from, since no build backend builds its C++ side yet (see
+# omip_mujoco_wrapper/__init__.py and PORTING_NOTES.md's Phase 6 section).
+# Build it first per the top-level README, then this package's __init__.py
+# will find it on sys.path automatically.
+
+[tool.setuptools.packages.find]
+include = ["omip_mujoco_wrapper*"]

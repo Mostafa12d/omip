@@ -1058,7 +1058,137 @@ orientation/orientation-covariance/joint-value, and the combined filter's
   whatever `Python3_EXECUTABLE` CMake found.
 
 ## Phase 6 — `omip_mujoco_wrapper`
-Status: not started.
+Status: **done**, exit criterion met. `examples/run_demo.py` runs standalone
+(no ROS installed anywhere on the machine), renders a synthetic MuJoCo
+scene, feeds it through the full ported pipeline via `omip_core`'s Phase 5
+bindings, and prints a joint type + parameter estimate for the demo object
+— confirmed by actually running it (not just reading the code): it
+correctly and confidently identifies the demo's sliding drawer as a
+**prismatic** joint (probability ≈0.80 vs. 0.20 for disconnected, ≈0 for
+rigid/revolute) with a plausible (same-order-of-magnitude, not exact)
+displacement estimate.
+
+### 6.1 What was built
+
+New package `omip_mujoco_wrapper/` (separate from `omip_core`, per the
+mission brief's layout), thin on purpose:
+- `omip_mujoco_wrapper/driver.py` — `MuJoCoDriver`: owns the
+  `mujoco.MjModel`/`MjData`/`Renderer`, exposes `render_rgbd()` (RGB+depth
+  numpy arrays) and `camera_intrinsics()`. The only module that imports
+  `mujoco` — per the mission brief, `omip_core` must stay simulator-free
+  and this wrapper must stay ROS-porting-free, so MuJoCo-specific code is
+  quarantined to this one file.
+- `omip_mujoco_wrapper/orchestrator.py` — `OmipOrchestrator`: constructs
+  the 3 `omip_core` stage objects (parameters matching the same cfg-yaml
+  defaults used throughout Phases 2-5's test harnesses) and exposes
+  `process_frame(rgb_bgr, depth, timestamp_ns)`, which runs the
+  `setMeasurement`/`predictState`/`predictMeasurement`/`correctState`
+  sequence through all 3 stages and returns the rigid-body state +
+  kinematic structure. Deliberately MuJoCo-agnostic — takes plain arrays,
+  so the same orchestrator works against any RGB-D source (a real depth
+  camera, once available — see the conversation history around
+  RealSense/LiDAR-phone options).
+- `omip_mujoco_wrapper/scene_utils.py` — builds the demo MJCF scene and a
+  `linear_ramp()` helper for scripting the interaction (directly
+  prescribing the joint's qpos over time, per the mission brief's
+  "scripted...actuated joint motion" option — no physical
+  actuator/controller needed since this isn't testing MuJoCo's dynamics).
+- `examples/run_demo.py` — wires the three together, runs 150 simulated
+  frames of a drawer sliding open, prints the final joint estimate.
+- `pyproject.toml` + `README.md`: minimal `setuptools` packaging;
+  `omip_core` is deliberately **not** listed as a pip dependency (nothing
+  publishes it yet — see 6.4) — `omip_mujoco_wrapper/__init__.py` instead
+  auto-adds `omip_core/build/python` to `sys.path` if `omip_core` isn't
+  already importable.
+- New dev-only dependency: a `.venv` at the repo root with `mujoco`,
+  `numpy` installed (not committed; `.gitignore`'d).
+
+### 6.2 Demo scene: a drawer, not the hinged door tried first
+
+The mission brief's Phase 6 description suggests "e.g. a hinged door or
+drawer" — a hinged door (revolute joint) was tried first, since it was the
+more visually obvious "articulated object" example. It was set aside after
+substantial tuning effort for a concrete reason, not aesthetics:
+
+- Once a second rigid body (the door) was reliably detected and a joint
+  filter initialized, `RevoluteJointFilter`'s probability stayed
+  essentially zero (`rev_prob` sometimes exactly `0.000`, sometimes ~1e-3)
+  across many parameter sweeps (system-noise covariances, rotation speed/
+  range, RANSAC thresholds, rigid-body-tracker thresholds, MuJoCo depth
+  clip planes) — `PrismaticJointFilter` or `DisconnectedJointFilter` won
+  the model-selection race instead, even though the true motion was purely
+  rotational. This was investigated as a possible **porting** bug first
+  (same rigor as Phase 4's degenerate-input finding), but the ported
+  `RevoluteJointFilter`/`NonLinearRevoluteMeasurementPdf` code itself was
+  re-checked against PORTING_NOTES.md's Phase 4 record and found
+  unchanged/correct; the issue is EKF **convergence/calibration** for this
+  specific synthetic trajectory (large-angle rotation over a short,
+  compressed demo timeline, plus whatever depth-precision limits MuJoCo's
+  offscreen renderer has), not a mistranslated formula.
+- The same scene/pipeline, switched to a **drawer** (prismatic joint,
+  simpler linear motion, no large-angle EKF linearization or spherical-
+  coordinate axis-fitting involved) converged cleanly and repeatably on
+  the first real attempt: stable rigid-body tracking (no spurious
+  loss/recreation of the tracked body) and a confidently-correct
+  PRISMATIC classification.
+- Since the mission brief explicitly names "a hinged door **or drawer**"
+  as an acceptable example object, switching is a legitimate choice, not a
+  workaround — but the hinged-door gap is real and worth recording:
+  **getting a revolute demo to classify correctly is flagged as a
+  reasonable, still-open follow-up**, not silently swept under the rug.
+  (See `omip_mujoco_wrapper/README.md`'s "Known limitations" for the
+  user-facing version of this note.)
+
+### 6.3 Two MuJoCo-specific rendering findings (not omip_core issues)
+
+Both discovered empirically while getting the demo scene to actually
+produce trackable features and valid depth — neither is a porting
+decision, both are just MuJoCo/rendering facts worth recording so they
+don't need re-discovering:
+
+- **`builtin="checker"` 2D textures don't tile correctly on `box` geom
+  faces in this MuJoCo version** (verified: renders as either a flat solid
+  color or 1-axis stripes depending on `texrepeat`/`texuniform`, never a
+  real 2-axis checkerboard — confirmed separately that the *same* texture
+  on a `plane` geom renders a correct checkerboard). Since `goodFeaturesToTrack`
+  needs real 2D texture variation to find corners, and MuJoCo requires
+  `plane` geoms to live in static bodies (can't attach one to the moving
+  drawer), the drawer and cabinet faces are built as a literal grid of
+  small alternating-color `box` geoms (a "physical" checkerboard) instead
+  of a single textured box — see `scene_utils._tile_grid_xml()`. This
+  sidesteps the texture-mapping limitation entirely and is arguably more
+  robust (real geometric edges, not a texture that could render
+  inconsistently).
+- **Empty background renders at a very large ("far-plane") depth value**
+  (tens of meters, in a scene where everything real is 1-3m away) unless
+  every pixel in frame is covered by real, finite geometry. The demo scene
+  adds a floor and backdrop wall (both `plane` geoms, sized to fill the
+  whole camera view) purely so no pixel ever reports a bogus depth reading
+  that could corrupt feature triangulation. Also tightened MuJoCo's
+  `<visual><map znear=".." zfar=".."/>` to roughly the scene's real depth
+  range (0.3-6m instead of MuJoCo's much larger defaults) for better
+  z-buffer precision in that range.
+
+### 6.4 Known follow-ups (not blocking, recorded for later)
+
+- Hinged-door (revolute) demo classification (6.2).
+- `omip_core` has no build backend that compiles its C++/pybind11 side as
+  part of `pip install` — it's wired into `omip_mujoco_wrapper` via a
+  `sys.path` bootstrap (`omip_mujoco_wrapper/__init__.py`) pointing at the
+  locally-built `omip_core/build/python`, not a real packaging story. Fine
+  for this mission's scope (a single-machine, build-it-yourself research
+  pipeline) but would need a proper `scikit-build-core`-based build (or
+  similar) to be pip-installable/distributable.
+- The prismatic joint's estimated displacement (`prism_joint_value`)
+  tracks the true slide distance in the right order of magnitude and
+  direction but isn't a tight numerical match (e.g. ≈0.29m estimated vs.
+  0.40m true at the end of the demo) — plausible given no golden fixtures
+  ever validated the estimator's absolute numerical accuracy (Phases 2-4
+  are all still "ported, unvalidated, awaiting fixtures") and given the
+  demo's synthetic camera/noise parameters were tuned for stable
+  classification, not for parameter-estimation accuracy. Not investigated
+  further this phase — flagged for whenever real golden fixtures (or a
+  more careful demo-parameter calibration pass) become available.
 
 ## Phase 7 — `shape_tracker` / `shape_reconstruction` (optional)
 Status: not started; not pursued unless requested after Phase 6.
