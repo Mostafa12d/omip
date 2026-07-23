@@ -57,3 +57,36 @@ See `tests/test_rb_tracker.cpp` for the loader/comparison code and the
 default MultiRBTracker parameters used (matched to
 `rb_tracker/cfg/rb_tracker_cfg.yaml`'s defaults). Same "ported, unvalidated,
 awaiting fixtures" behavior as feature_tracker until fixtures land.
+
+## joint_tracker
+
+Expected layout (proposed; confirm against the actual Docker-side export
+once available):
+
+```
+tests/fixtures/joint_tracker/<sequence_name>/
+  frame_0000.npz, frame_0001.npz, ...
+    keys: "rb_ids" (M,) int64, "pose_twist" (M,6) float64 [rx,ry,rz,vx,vy,vz],
+          "velocity_twist" (M,6) float64 [rx,ry,rz,vx,vy,vz],
+          "centroid" (M,3) float64
+          [matches rb_tracker's output state — joint_tracker's input
+          measurement is rb_tracker's state],
+          "timestamp_ns" (1,) float64,
+          "expected_rrb_ids" (K,) int64, "expected_srb_ids" (K,) int64,
+          "expected_joint_type" (K,) int64
+          [JointFilterType enum value: RIGID_JOINT=0, PRISMATIC_JOINT=1,
+          REVOLUTE_JOINT=2, DISCONNECTED_JOINT=3],
+          "expected_joint_state" (K,) float64
+          — reference most-probable joint type + joint state for each
+          (reference rigid body, second rigid body) pair after that frame's
+          correctState()+estimateJointFiltersProbabilities(), from the
+          original MultiJointTracker. M includes the static environment
+          body (rb_id 0); K is however many rrb/srb pairs had an active
+          joint filter at that frame.
+```
+
+See `tests/test_joint_tracker.cpp` for the loader/comparison code and the
+default MultiJointTracker parameters used (matched to
+`joint_tracker/cfg/joint_tracker_cfg.yaml`'s defaults). Same "ported,
+unvalidated, awaiting fixtures" behavior as feature_tracker/rb_tracker until
+fixtures land.

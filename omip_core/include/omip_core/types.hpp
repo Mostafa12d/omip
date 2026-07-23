@@ -185,6 +185,56 @@ struct KinematicStructure
     std::vector<JointModel> joints;
 };
 
+// Replaces visualization_msgs::Marker for joint_tracker's debug/visualization
+// output. joint_tracker's `getJointMarkersInRRBFrame()` (renamed
+// `getJointDebugGeometryInRRBFrame()` — see PORTING_NOTES.md judgment call
+// J-series) only ever set ns/id/action/type/pose/scale/color/points/text/
+// mesh_resource, never any of Marker's other ROS-specific fields (Header,
+// lifetime, frame_locked, mesh_use_embedded_materials, ...) — those are
+// dropped. `header.frame_id` is dropped too: every call site left it unset
+// or commented out with a note that the frame name is assigned later by the
+// (Node-only, unported) MultiJointTrackerNode.
+enum class DebugGeometryType
+{
+    Arrow = 0,
+    Sphere = 1,
+    TextViewFacing = 2,
+    MeshResource = 3
+};
+
+enum class DebugGeometryAction
+{
+    Add = 0,
+    Delete = 1
+};
+
+struct DebugGeometry
+{
+    std::string ns;
+    int id = 0;
+    DebugGeometryType type = DebugGeometryType::Arrow;
+    DebugGeometryAction action = DebugGeometryAction::Add;
+
+    // Used directly by SPHERE/TEXT_VIEW_FACING/MESH_RESOURCE; ignored by
+    // ARROW-by-points (which uses `points` below instead, matching the
+    // original Marker's two mutually exclusive ways of positioning an ARROW).
+    Eigen::Vector3d position = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
+
+    Eigen::Vector3d scale = Eigen::Vector3d::Zero();
+    // (r, g, b, a)
+    Eigen::Vector4d color = Eigen::Vector4d::Zero();
+
+    // ARROW-by-points mode: exactly 2 entries, start and end.
+    std::vector<Eigen::Vector3d> points;
+
+    // TEXT_VIEW_FACING only.
+    std::string text;
+
+    // MESH_RESOURCE only.
+    std::string mesh_resource;
+};
+
 // Measurement type for the combined joint filter and all joint filters;
 // replaces the original std::pair<omip_msgs::RigidBodyPoseAndVelMsg,
 // omip_msgs::RigidBodyPoseAndVelMsg>.

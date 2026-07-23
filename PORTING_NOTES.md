@@ -714,7 +714,223 @@ documented defaults so the harness reflects the same configuration the
 original system would run with absent fixture-specific overrides.
 
 ## Phase 4 — Port `joint_tracker`
-Status: not started.
+Status: **ported, unvalidated, awaiting fixtures**. Builds cleanly (fresh
+rebuild, zero warnings). `tests/test_joint_tracker.cpp` runs via CTest and
+passes trivially ("no fixtures found") alongside the Phase 2/3 harnesses.
+Ad hoc runtime smoke-testing (not part of the committed suite — synthetic
+prismatic/revolute two-rigid-body trajectories fed through a full
+predict/correct loop) confirms the estimator runs to completion, converges
+to sane joint-type classifications and joint-state values, and doesn't
+crash; see 4.3 for one genuine (pre-existing, not porting-introduced)
+numerical edge case this testing turned up.
+
+### 4.1 What was ported
+
+All of `joint_tracker`'s estimator core, to `omip_core/{include,src}/joint_tracker/`:
+`JointFilter` (abstract base), `DisconnectedJointFilter`, `RigidJointFilter`,
+`PrismaticJointFilter`, `RevoluteJointFilter` (all 4 joint filter subtypes
+confirmed present — the Phase 4 exit criterion), their two BFL measurement
+models (`pdf/NonLinearPrismaticMeasurementPdf`, `pdf/NonLinearRevoluteMeasurementPdf`),
+`JointCombinedFilter` (holds one instance of each of the 4 joint filter
+types per RB pair, does model selection), and `MultiJointTracker` (owns the
+map of `JointCombinedFilter`s across all observed RB pairs, does data
+association/lifecycle). This is the highest-value, highest-risk part of the
+port per the mission brief, and was ported as literally as possible —
+class/method names, member names, and algorithm structure (including
+comments) are preserved verbatim wherever the ROS types being replaced
+allow it; the EKF predict/correct math, the Park & Okamura model-likelihood
+distance metric, and the joint-type probability bookkeeping are unchanged.
+
+Type replacements (per PORTING_NOTES.md 0.2/0.3, all already designed in
+Phase 0, following the Phase 2/3 precedent exactly):
+- `geometry_msgs::TwistWithCovariance` → `TwistWithCovariance` (already had
+  this in `types.hpp` since Phase 3).
+- `Eigen::Twistd` (lgsm) → `omip::Twistd` (Phase 2's `LieGroup.hpp`) —
+  `.exp(precision)`/`.log(precision)` member calls → free functions
+  `se3Exp(twistd, precision)`/`se3Log(isometry, precision)`;
+  `Eigen::Displacementd` → `Eigen::Isometry3d`.
+- `visualization_msgs::Marker` → new `omip::DebugGeometry` struct
+  (`types.hpp`) — see judgment call J12.
+- `ROSTwist2EigenTwist(msg.twist, twistd)` → direct assignment
+  `twistd = msg.twist` (the ROS message boundary is gone, `.twist` is
+  already an `omip::Twistd`) — same simplification pattern as Phase 3's
+  J11, applied throughout `JointFilter::setMeasurement()`/
+  `setInitialMeasurement()` and `MultiJointTracker::correctState()`.
+  Likewise `covariance[6*i+j]` flat-array double-loops → direct
+  `Eigen::Matrix<double,6,6>` assignment, and `.centroid.x/.y/.z` (ROS
+  Point-like access) → `.centroid` directly (`Eigen::Vector3d` in this
+  port since Phase 0).
+- `ros::NodeHandle`/`ros::Publisher`/`tf::TransformBroadcaster _tf_pub` —
+  see judgment call J13.
+- `omip_msgs::RigidBodyPoseAndVelMsg`/`RigidBodyPosesAndVelsMsg` →
+  `RigidBodyPoseAndVel`/`RigidBodyPosesAndVels` (already in `types.hpp`
+  since Phase 0/3); `MultiJointTracker`'s `omip_msgs::RigidBodyPosesAndVelsMsgPtr`
+  members → `boost::shared_ptr<ks_measurement_t>` (matches how the original
+  `.cpp` actually constructed them — `boost::shared_ptr<ks_measurement_t>(new ks_measurement_t(...))`
+  — rather than introducing a separate message-specific Ptr typedef).
+- `<ros/ros.h>` (only used for `ROS_ERROR_STREAM_NAMED` + `exit(BFL_ERRMISUSE)`
+  in both measurement pdfs' `dfGet()` fallback branch, and `ROS_INFO/DEBUG_STREAM_NAMED`
+  logging elsewhere) → `Log.h` shim; the `exit()` call specifically — see
+  judgment call J14.
+- `BOOST_FOREACH` kept as-is (not ROS-specific, matches the Phase 3
+  precedent of not modernizing working, already-ROS-free boost usage during
+  a literal port).
+
+**Judgment calls (Phase 4):**
+- **J12 —** `visualization_msgs::Marker` → new `omip::DebugGeometry` struct
+  in `types.hpp` (fields: `ns`, `id`, `type` (`DebugGeometryType` enum:
+  Arrow/Sphere/TextViewFacing/MeshResource — the only 4 Marker types
+  actually used across all 4 joint filters' debug-geometry methods),
+  `action` (Add/Delete), `position`/`orientation` (Eigen, replacing
+  `pose.position`/`pose.orientation`), `scale` (`Eigen::Vector3d`), `color`
+  (`Eigen::Vector4d`, r/g/b/a), `points` (`std::vector<Eigen::Vector3d>`,
+  for ARROW-by-two-points mode), `text`, `mesh_resource`). All 4
+  `getJointMarkersInRRBFrame()` methods renamed to
+  `getJointDebugGeometryInRRBFrame()` (on the abstract base too) since
+  "Marker" is an RViz/ROS-specific term with no meaning in a ROS-free
+  library — the geometry payload and its construction logic (including the
+  full chi-squared-confidence-ellipse uncertainty-cone math in
+  Prismatic/RevoluteJointFilter) is otherwise translated verbatim, just
+  with direct Eigen-typed field assignment (e.g.
+  `marker.orientation = quaternion` directly) replacing the original's
+  field-by-field `.x/.y/.z/.w` copies — same simplification category as
+  Phase 3's J11, not a behavior change. `header.frame_id` is dropped
+  entirely: every call site across all 4 filters either left it unset or
+  explicitly commented it out with a note that the Node layer (unported)
+  assigns it per-RB-pair.
+- **J13 —** Dropped `tf::TransformBroadcaster _tf_pub` (declared on
+  `JointFilter`, confirmed dead — grepped the whole package, no
+  `sendTransform()` call anywhere) and every
+  `#ifdef PUBLISH_PREDICTED_POSE_AS_PWC` block (one in each of
+  `JointFilter::initialize()`, `DisconnectedJointFilter`, `RigidJointFilter`,
+  `PrismaticJointFilter`, `RevoluteJointFilter`'s `getPredictedSRBPoseWithCovInSensorFrame()`)
+  along with the `ros::NodeHandle _predicted_next_pose_nh`/
+  `ros::Publisher _predicted_next_pose_publisher` members — the guarding
+  macro was permanently commented out in the original source
+  (`//#define PUBLISH_PREDICTED_POSE_AS_PWC 1`), so all of this was dead
+  code by construction, same category as Phase 3's J9/J10.
+- **J14 —** Both `NonLinearPrismaticMeasurementPdf::dfGet()` and
+  `NonLinearRevoluteMeasurementPdf::dfGet()` call `exit(BFL_ERRMISUSE)` in
+  their "derivative not implemented for this conditional argument" branch
+  (unreachable in practice — the EKF only ever calls `dfGet(0)`). A library
+  must never call `exit()` (already established precedent, see the
+  getchar()-removal rationale in Phase 3's J9) — replaced with
+  `OMIP_ERROR_STREAM_NAMED(...)` (preserving the diagnostic) followed by
+  `throw std::runtime_error(...)`. Since this branch is provably
+  unreachable given how BFL calls `dfGet()`, this is not a behavior change
+  for any real execution path.
+- **J15 —** Dropped the unused "Force Torque sensor" measurement-model
+  scaffolding in `PrismaticJointFilter::_initializeMeasurementModel()` (a
+  local `Gaussian meas_uncertainty_ft_PDF(...)` built and then discarded —
+  never assigned to any member, never referenced again; the
+  `imu_meas_pdf_`/`imu_meas_model_` lines right below it were already
+  commented out in the original). No behavior change: the object was
+  provably dead (constructed, never read).
+- **J16 —** Dropped an unused `Eigen::Twistd new_twist; ROSTwist2EigenTwist(...)`
+  pair of lines inside `MultiJointTracker::correctState()`'s
+  already-precomputing (but not-yet-old-enough) branch — `new_twist` is
+  computed and never referenced again anywhere in that branch. Same
+  confirmed-dead-local-variable category as J15.
+- **J17 —** Added a `Twistd operator*(const Eigen::Matrix<double,6,6>&, const Twistd&)`
+  free function to `LieGroup.hpp`, needed for the `adjoint * twist` pattern
+  in `{Prismatic,Revolute}JointFilter::getPredictedSRB{DeltaPose,Velocity}WithCovInSensorFrame()`.
+  Verified against lgsm's actual `Twist(const MatrixBase<OtherDerived>&)`
+  constructor (recovered from git history, `thirdparty/lgsm/include/lgsm/Twist.h`
+  before its Phase 2 removal): it copies a generic 6-vector expression's
+  coefficients directly into storage, with no awareness of any
+  angular-first/linear-first semantic split. The new operator replicates
+  exactly that — a raw `matrix * coeffs()` multiply — regardless of
+  `computeAdjoint()`'s own doc-comment (from the original source) about
+  swapping rotation/translation block order for a "translation-first"
+  convention; whatever the original code's actual numerical result was
+  (correct or not, by whatever convention), this reproduces it bit-for-bit
+  rather than "fixing" a potential convention mismatch that isn't this
+  port's business to resolve.
+- **J18 —** Fixed a pre-existing bug in this port's own `OMIPTypeDefs.h`
+  (introduced in Phase 0/2, before `joint_tracker` existed in the port and
+  went unnoticed since nothing exercised it): `KinematicModel`
+  (`= ks_state_t`) was typedef'd with `std::shared_ptr<JointCombinedFilter>`,
+  but `JointCombinedFilterPtr` (`joint_tracker/JointCombinedFilter.h`) —
+  which `MultiJointTracker::_reflectState()` directly assigns into
+  `_state`/`ks_state_t` — is `boost::shared_ptr<JointCombinedFilter>`. Two
+  different smart-pointer types are not assignment-compatible, so this
+  would not have compiled once `MultiJointTracker` was wired up. Checked
+  the original (pre-port) `omip_common/OMIPTypeDefs.h`: it used
+  `boost::shared_ptr` here too, confirming this was an unintentional
+  deviation from the original in this port, not a deliberate Phase 0
+  choice — fixed to match both the original and `JointCombinedFilterPtr`.
+- Minor simplification (not a numerical change): `RigidJointFilter`/
+  `PrismaticJointFilter`'s debug-geometry and joint-position code built an
+  `Eigen::Affine3d` from an `Eigen::Displacementd`'s `.toHomogeneousMatrix()`
+  purely to then do `affine.inverse() * point`; since `Eigen::Isometry3d`
+  supports `.inverse()` and `operator*(Vector3d)` directly, the
+  Affine3d round-trip is skipped and the `Isometry3d` (already produced by
+  `se3Exp()`) is used directly for the same point transform.
+
+### 4.2 Testing
+
+Ad hoc runtime smoke test (two synthetic RB pairs — one purely
+translating, one purely rotating about a fixed axis — driven through
+~40 frames of `setMeasurement`/`predictState`/`predictMeasurement`/
+`correctState`/`estimateJointFiltersProbabilities`, with realistic nonzero
+pose/velocity covariances) confirms:
+- The estimator runs to completion with no crash, for all 4 joint filter
+  types running in parallel inside `JointCombinedFilter` every frame.
+- On the purely-translating trajectory, `RigidJointFilter`'s probability
+  correctly drops to (and stays at) 0 once the accumulated translation
+  exceeds `rig_max_translation` — the "motion memory" design working as
+  intended (a rigid-joint hypothesis, once disproved, never recovers).
+- On the purely-rotating trajectory, `RevoluteJointFilter`'s EKF state
+  converges to finite, sane values (joint angle magnitude tracking the
+  synthetic angular velocity) — confirming the revolute EKF's nonlinear
+  measurement model, its analytic Jacobian (`NonLinearRevoluteMeasurementPdf`),
+  and the `unwrapTwist`/`invertTwist` angle-unwrapping logic all work
+  end-to-end after the port.
+- **Finding, not a porting bug:** on the purely-translating (zero relative
+  rotation) trajectory, `RevoluteJointFilter::initialize()` produces NaN.
+  Root cause: `_joint_state = _joint_orientation.norm()` is exactly 0 when
+  the initial relative twist's rotational part is exactly `(0,0,0)`, and
+  the very next line divides by `pow(_joint_state, 2)` — a 0/0 division
+  that is a direct, literal property of the original formula, not
+  something introduced by this port (verified by re-reading the ported
+  code against the original source side-by-side; the division is
+  unchanged). This is exceedingly unlikely to trigger against real
+  `rb_tracker` output (floating-point sensor noise means a real relative
+  rotation is essentially never *exactly* zero), which is presumably why
+  it was never observed against real data in the original ROS system. Not
+  fixed, per the mission's "no silent numerical changes" instruction — a
+  guard here would be a genuine (if reasonable) algorithmic change, not a
+  behavior-preserving port step. Flagged here for the user's awareness;
+  worth asking about explicitly if it ever surfaces against real golden
+  fixtures.
+
+`tests/test_joint_tracker.cpp` + `tests/fixtures/README.md`'s new
+`joint_tracker` section document the proposed `.npz` fixture schema
+(per-frame rigid-body pose/velocity/centroid in, per-RB-pair most-probable
+joint type + joint state out) — **proposed**, not yet confirmed against the
+actual Docker-side export. Default `MultiJointTracker` construction
+parameters in the harness are matched to
+`joint_tracker/cfg/joint_tracker_cfg.yaml`'s documented defaults (`min_num_frames_for_new_rb`
+matched to the value `test_rb_tracker.cpp` already uses, since the original
+reads this parameter from `/rb_tracker/...`, shared with `rb_tracker`'s own
+config). Same "ported, unvalidated, awaiting fixtures" behavior as
+Phases 2/3 until fixtures land.
+
+### 4.3 BFL vendoring
+
+No changes needed to `thirdparty/bfl/CMakeLists.txt` — every BFL source
+`joint_tracker` needs (`filter/extendedkalmanfilter.cpp`,
+`pdf/linearanalyticconditionalgaussian.cpp`,
+`pdf/analyticconditionalgaussian_additivenoise.cpp`,
+`model/linearanalyticsystemmodel_gaussianuncertainty.cpp`,
+`model/analyticmeasurementmodel_gaussianuncertainty.cpp`, `pdf/gaussian.cpp`)
+was already vendored and compiled in Phase 1, confirmed by a clean build.
+One toolchain-only addition (no behavior change, same category as prior
+`#include` fixes): explicit `#include <boost/math/special_functions/round.hpp>`
+in `RigidJointFilter.cpp`/`PrismaticJointFilter.cpp`/`RevoluteJointFilter.cpp`
+for `boost::math::round()` — the original relied on this being pulled in
+transitively via some ROS-era header chain that no longer exists once the
+ROS includes are gone.
 
 ## Phase 5 — pybind11 bindings
 Status: not started.

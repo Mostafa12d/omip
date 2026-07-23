@@ -32,6 +32,8 @@
 #include <map>
 #include <utility>
 
+#include <boost/shared_ptr.hpp>
+
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
 
@@ -101,7 +103,15 @@ typedef pcl::PointCloud<FeaturePCLwc> FeatureCloudPCLwc;
 
 typedef pcl::PointCloud<PointPCL> RigidBodyShape;
 
-typedef std::map<std::pair<int, int>, std::shared_ptr<JointCombinedFilter> > KinematicModel;
+// boost::shared_ptr (not std::shared_ptr): must match JointCombinedFilterPtr
+// (joint_tracker/JointCombinedFilter.h), which MultiJointTracker's
+// joint_combined_filters_map is built from and directly assigns into
+// ks_state_t/_state (see MultiJointTracker::_reflectState(), Phase 4).
+// Originally this file (Phase 0/2, before joint_tracker existed in this
+// port) had this as std::shared_ptr — an unintentional deviation from the
+// original ROS source (which used boost::shared_ptr here too) that went
+// unnoticed because nothing exercised KinematicModel/ks_state_t until now.
+typedef std::map<std::pair<int, int>, boost::shared_ptr<JointCombinedFilter> > KinematicModel;
 
 // Feature Tracker FILTER MEASUREMENT type. The first element is the RGB
 // image. The second element is the depth image. Was

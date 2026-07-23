@@ -66,6 +66,11 @@ public:
     Eigen::Vector3d getAngularVelocity() const { return m_coeffs.head<3>(); }
     Eigen::Vector3d getLinearVelocity() const { return m_coeffs.tail<3>(); }
 
+    // Replaces the .norm() inherited from Eigen::MatrixBase in lgsm's
+    // Eigen::Twistd (which derived from a generic 6x1 Eigen expression
+    // type) — plain Euclidean norm of the 6 stacked coefficients.
+    double norm() const { return m_coeffs.norm(); }
+
     const Eigen::Matrix<double, 6, 1>& coeffs() const { return m_coeffs; }
     Eigen::Matrix<double, 6, 1>& coeffs() { return m_coeffs; }
 
@@ -81,6 +86,23 @@ private:
 };
 
 inline Twistd operator*(double s, const Twistd& t) { return t * s; }
+
+// Replaces the implicit Eigen::Matrix<double,6,6> * Eigen::Twistd(lgsm)
+// multiplication used in joint_tracker (e.g. `adjoint * twist` in
+// PrismaticJointFilter/RevoluteJointFilter's getPredictedSRB*() methods).
+// lgsm's Twistd had a `Twist(const MatrixBase<OtherDerived>&)` constructor
+// that copied a generic 6-vector expression's coefficients directly into
+// m_coeffs (verified in lgsm's own Twist.h, git history) — i.e. purely
+// mechanical, position-for-position, with no awareness of the
+// angular-first/linear-first semantic split. This free function replicates
+// exactly that: raw 6x6-matrix-times-6-vector on coeffs(), independent of
+// whether the matrix (e.g. from computeAdjoint(), OMIPUtils.cpp) was
+// documented as expecting a different ordering — same computation the
+// original code performed, preserved as-is (see PORTING_NOTES.md Phase 4).
+inline Twistd operator*(const Eigen::Matrix<double, 6, 6>& m, const Twistd& t)
+{
+    return Twistd((m * t.coeffs()).eval());
+}
 
 inline Eigen::Matrix3d skew(const Eigen::Vector3d& w)
 {

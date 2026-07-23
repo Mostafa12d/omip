@@ -38,6 +38,16 @@ add_library(omip_core
   src/rb_tracker/RBFilter.cpp
   src/rb_tracker/StaticEnvironmentFilter.cpp
   src/rb_tracker/MultiRBTracker.cpp
+  # Phase 4: joint_tracker
+  src/joint_tracker/JointFilter.cpp
+  src/joint_tracker/DisconnectedJointFilter.cpp
+  src/joint_tracker/RigidJointFilter.cpp
+  src/joint_tracker/PrismaticJointFilter.cpp
+  src/joint_tracker/RevoluteJointFilter.cpp
+  src/joint_tracker/pdf/NonLinearPrismaticMeasurementPdf.cpp
+  src/joint_tracker/pdf/NonLinearRevoluteMeasurementPdf.cpp
+  src/joint_tracker/JointCombinedFilter.cpp
+  src/joint_tracker/MultiJointTracker.cpp
 )
 
 target_include_directories(omip_core PUBLIC
